@@ -381,19 +381,8 @@ HypeScrollTrigger is designed as a drop-in replacement for HypeScrollMagic:
 | Manual refresh | Auto-refresh on scene changes |
 | Basic interpolation | Smooth timeline option (default enabled) |
 
-## Content Delivery Network (CDN)
-
-To seamlessly integrate the latest version of `HypeScrollTrigger` into your Hype project, include the following script tag in the head section of your HTML:
-
-```html
-<script src="https://cdn.jsdelivr.net/gh/worldoptimizer/HypeScrollTrigger/HypeScrollTrigger.min.js"></script>
-```
-
-For additional security and version control, you may opt to use a version with Subresource Integrity (SRI) or specify a particular release. Detailed instructions and options are available on the JsDelivr CDN page for `HypeScrollTrigger`.
-
 ## Compatibility
-
-`HypeScrollTrigger` is designed to work seamlessly with Tumult Hype and is compatible with most modern web browsers, ensuring a wide audience can experience the scroll-based animations.
+`HypeScrollTrigger` is designed to integrate seamlessly with Tumult Hype and is compatible with most modern web browsers, ensuring a wide audience can experience the scroll-based animations. While future updates may introduce new interfaces or affect backward compatibility, version 1.0.0 should be a straightforward implementation.
 
 ## License
 
