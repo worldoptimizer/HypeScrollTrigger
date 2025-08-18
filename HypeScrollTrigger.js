@@ -7,6 +7,7 @@
  * Version-History
  * 1.0.0 Initial release under MIT-license
  * 1.0.1 Fixed pin wrapper nesting issue by checking for existing wrappers before creation
+ *       Fixed timeline drift after repeated pin boundary crossings
 */
 if ("HypeScrollTrigger" in window === false) window['HypeScrollTrigger'] = (function () {
 	const _version = '1.0.1';
@@ -61,33 +62,60 @@ if ("HypeScrollTrigger" in window === false) window['HypeScrollTrigger'] = (func
 			});
 		}
 	}
-
+	
 	/**
 	 * Update timeline with smooth interpolation
 	 */
 	function updateTimelineSmooth(trigger, targetProgress) {
-		const state = timelineStates.get(trigger);
-		if (!state || !state.enabled) {
-			// Direct update if smooth is disabled
-			if (state && state.timelineName) {
-				try {
-					const duration = state.api.durationForTimelineNamed(state.timelineName);
-					if (duration !== 0) {
-						state.api.goToTimeInTimelineNamed(targetProgress * duration, state.timelineName);
-					}
-				} catch (e) {
-					console.error("❌ Error updating timeline:", e);
-				}
-			}
-			return;
-		}
-		
-		state.targetProgress = targetProgress;
-		
-		if (!state.animating) {
-			state.animating = true;
-			animateTimeline(trigger);
-		}
+	    const state = timelineStates.get(trigger);
+	    if (!state || !state.enabled) {
+	        // Direct update if smooth is disabled
+	        if (state && state.timelineName) {
+	            try {
+	                const duration = state.api.durationForTimelineNamed(state.timelineName);
+	                if (duration !== 0) {
+	                    state.api.goToTimeInTimelineNamed(targetProgress * duration, state.timelineName);
+	                }
+	            } catch (e) {
+	                console.error("❌ Error updating timeline:", e);
+	            }
+	        }
+	        return;
+	    }
+	    
+	    // CRITICAL FIX: Reset animation state if ScrollTrigger is in transition
+	    const scrollTriggerInstance = ScrollTrigger.getAll().find(st => {
+	        const sceneId = state.api.currentSceneId ? state.api.currentSceneId() : null;
+	        return st.trigger && st.trigger.id === sceneId;
+	    });
+	    
+	    // Force immediate sync if large progress jump (boundary crossing)
+	    const progressDiff = Math.abs(targetProgress - state.currentProgress);
+	    if (progressDiff > 0.5 || (scrollTriggerInstance && scrollTriggerInstance.isReverted)) {
+	        state.currentProgress = targetProgress;
+	        state.targetProgress = targetProgress;
+	        state.animating = false;
+	        
+	        // Immediate timeline update for large jumps
+	        if (state.timelineName) {
+	            try {
+	                const duration = state.api.durationForTimelineNamed(state.timelineName);
+	                if (duration !== 0) {
+	                    state.api.goToTimeInTimelineNamed(targetProgress * duration, state.timelineName);
+	                }
+	            } catch (e) {
+	                console.error("❌ Error updating timeline:", e);
+	            }
+	        }
+	        return;
+	    }
+	    
+	    state.targetProgress = targetProgress;
+	    
+	    if (!state.animating) {
+	        state.animating = true;
+	        animateTimeline(trigger);
+	    }
 	}
 
 	/**
