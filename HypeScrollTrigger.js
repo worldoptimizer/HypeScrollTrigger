@@ -1,7 +1,7 @@
 /*!
  * Hype ScrollTrigger v1.0.1
  * Integrates GSAP ScrollTrigger with Tumult Hype for scroll-based animations and interactions.
- * Copyright (2024) Max Ziebell, (https://maxziebell.de). MIT-license
+ * Copyright (2025) Max Ziebell, (https://maxziebell.de). MIT-license
  */
 /*
  * Version-History
