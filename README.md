@@ -1,5 +1,7 @@
 # Hype ScrollTrigger
 
+![Hype-ScrollTrigger](https://playground.maxziebell.de/Hype/ScrollTrigger/HypeScrollTrigger.jpg)
+
 A modern scroll-based animation library that integrates **GSAP ScrollTrigger** with **Tumult Hype** for high-performance scroll interactions and timeline control.
 
 > Designed specifically for Tumult Hype users! This plugin works with Hype's visual Inspector interface - no hand-coding HTML required.
