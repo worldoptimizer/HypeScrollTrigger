@@ -1,5 +1,5 @@
 /*!
- * Hype ScrollTrigger v1.0.0
+ * Hype ScrollTrigger v1.0.1
  * Integrates GSAP ScrollTrigger with Tumult Hype for scroll-based animations and interactions.
  * Copyright (2024) Max Ziebell, (https://maxziebell.de). MIT-license
  * 
@@ -7,9 +7,11 @@
  */
 /*
  * Version-History
- * 1.0.0 Initial release
+ * 1.0.0 Initial release under MIT-license
+ * 1.0.1 Fixed pin wrapper nesting issue by checking for existing wrappers before creation
 */
 if ("HypeScrollTrigger" in window === false) window['HypeScrollTrigger'] = (function () {
+	const _version = '1.0.1';
 	
 	// Check for GSAP and ScrollTrigger
 	if (!window.gsap || !window.ScrollTrigger) {
@@ -211,15 +213,20 @@ function addScrollTimeline(hypeDocument, element, timelineName, options) {
     const api = symbolInstance ? symbolInstance : hypeDocument;
     
     // --- WRAPPER LOGIC FOR PINNING ---
-    let elementToPin = element; // By default, pin the element itself
-    if (options.pin) {
-        const wrapper = document.createElement('div');
-        wrapper.classList.add('hype-gsap-scroll-pin-wrapper');
-        
-        element.parentNode.insertBefore(wrapper, element);
-        wrapper.appendChild(element);
-        elementToPin = wrapper; // Now, ScrollTrigger will pin this wrapper
-    }
+	let elementToPin = element;
+	if (options.pin) {
+	    // Check if element is already in a pin wrapper
+	    const existingWrapper = element.closest('.hype-gsap-scroll-pin-wrapper');
+	    if (existingWrapper) {
+	        elementToPin = existingWrapper;
+	    } else {
+	        const wrapper = document.createElement('div');
+	        wrapper.classList.add('hype-gsap-scroll-pin-wrapper');
+	        element.parentNode.insertBefore(wrapper, element);
+	        wrapper.appendChild(element);
+	        elementToPin = wrapper;
+	    }
+	}
     // --- END WRAPPER LOGIC ---
     
     // Parse duration
@@ -660,7 +667,7 @@ function addScrollTimeline(hypeDocument, element, timelineName, options) {
 	
 	// Public API
 	return {
-		version: '1.0.0',
+		version: _version,
 		setDefault: setDefault,
 		getDefault: getDefault,
 		// Additional utility to manually refresh ScrollTrigger
