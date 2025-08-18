@@ -2,11 +2,6 @@
 
 A modern scroll-based animation library that integrates **GSAP ScrollTrigger** with **Tumult Hype** for high-performance scroll interactions and timeline control.
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/worldoptimizer/HypeScrollTrigger)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![GSAP](https://img.shields.io/badge/requires-GSAP%20ScrollTrigger-orange.svg)](https://greensock.com/scrolltrigger/)
-[![Hype](https://img.shields.io/badge/designed%20for-Tumult%20Hype-purple.svg)](https://tumult.com/hype/)
-
 > Designed specifically for Tumult Hype users! This plugin works with Hype's visual Inspector interface - no hand-coding HTML required.
 
 ## Overview
