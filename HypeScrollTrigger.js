@@ -1,5 +1,5 @@
 /*!
- * Hype ScrollTrigger v1.0.1
+ * Hype ScrollTrigger v1.1.0
  * Integrates GSAP ScrollTrigger with Tumult Hype for scroll-based animations and interactions.
  * Copyright (2025) Max Ziebell, (https://maxziebell.de). MIT-license
  */
@@ -7,10 +7,12 @@
  * Version-History
  * 1.0.0 Initial release under MIT-license
  * 1.0.1 Fixed pin wrapper nesting issue by checking for existing wrappers before creation
- *       Fixed timeline drift after repeated pin boundary crossings
+ *       Fixed pin state corruption during rapid scroll direction changes by refreshing trigger state on leave events
+ * 1.1.0 Replaced manual RAF smoothing with GSAP timeline proxy system for better performance and smoother animations
+ *       Eliminated double timeline execution and timing conflicts between update systems
 */
 if ("HypeScrollTrigger" in window === false) window['HypeScrollTrigger'] = (function () {
-	const _version = '1.0.1';
+	const _version = '1.1.0';
 	
 	// Check for GSAP and ScrollTrigger
 	if (!window.gsap || !window.ScrollTrigger) {
@@ -23,7 +25,7 @@ if ("HypeScrollTrigger" in window === false) window['HypeScrollTrigger'] = (func
 	
 	// Storage for triggers per scene
 	const triggers = {};
-	const timelineStates = new Map();
+	const proxyTimelines = new Map();
 
 	/* default options */
 	let _default = {
@@ -34,7 +36,8 @@ if ("HypeScrollTrigger" in window === false) window['HypeScrollTrigger'] = (func
 			indicatorColor: 'grey',
 			// Smooth Scrolling Defaults
 			smooth: true,
-			smoothFactor: 0.15,
+			smoothDuration: 0.3,
+			smoothEase: "power2.out",
 		},
 		behavior: {
 			enter: true,
@@ -47,120 +50,85 @@ if ("HypeScrollTrigger" in window === false) window['HypeScrollTrigger'] = (func
 	};
 
 	/**
-	 * Initialize smooth timeline state for a trigger
+	 * Create GSAP timeline proxy for smooth Hype timeline control
 	 */
-	function initSmoothTimeline(trigger, timelineName, api, options = {}) {
-		if (!timelineStates.has(trigger)) {
-			timelineStates.set(trigger, {
-				timelineName: timelineName,
-				api: api,
-				currentProgress: 0,
-				targetProgress: 0,
-				animating: false,
-				smoothFactor: options.smoothFactor || _default.options.smoothFactor,
-				enabled: options.smooth !== false
-			});
+	function createTimelineProxy(triggerId, timelineName, api, options = {}) {
+		if (proxyTimelines.has(triggerId)) {
+			return proxyTimelines.get(triggerId);
 		}
-	}
-	
-	/**
-	 * Update timeline with smooth interpolation
-	 */
-	function updateTimelineSmooth(trigger, targetProgress) {
-	    const state = timelineStates.get(trigger);
-	    if (!state || !state.enabled) {
-	        // Direct update if smooth is disabled
-	        if (state && state.timelineName) {
-	            try {
-	                const duration = state.api.durationForTimelineNamed(state.timelineName);
-	                if (duration !== 0) {
-	                    state.api.goToTimeInTimelineNamed(targetProgress * duration, state.timelineName);
-	                }
-	            } catch (e) {
-	                console.error("❌ Error updating timeline:", e);
-	            }
-	        }
-	        return;
-	    }
-	    
-	    // CRITICAL FIX: Reset animation state if ScrollTrigger is in transition
-	    const scrollTriggerInstance = ScrollTrigger.getAll().find(st => {
-	        const sceneId = state.api.currentSceneId ? state.api.currentSceneId() : null;
-	        return st.trigger && st.trigger.id === sceneId;
-	    });
-	    
-	    // Force immediate sync if large progress jump (boundary crossing)
-	    const progressDiff = Math.abs(targetProgress - state.currentProgress);
-	    if (progressDiff > 0.5 || (scrollTriggerInstance && scrollTriggerInstance.isReverted)) {
-	        state.currentProgress = targetProgress;
-	        state.targetProgress = targetProgress;
-	        state.animating = false;
-	        
-	        // Immediate timeline update for large jumps
-	        if (state.timelineName) {
-	            try {
-	                const duration = state.api.durationForTimelineNamed(state.timelineName);
-	                if (duration !== 0) {
-	                    state.api.goToTimeInTimelineNamed(targetProgress * duration, state.timelineName);
-	                }
-	            } catch (e) {
-	                console.error("❌ Error updating timeline:", e);
-	            }
-	        }
-	        return;
-	    }
-	    
-	    state.targetProgress = targetProgress;
-	    
-	    if (!state.animating) {
-	        state.animating = true;
-	        animateTimeline(trigger);
-	    }
+
+		const hypeTimelineDuration = api.durationForTimelineNamed(timelineName);
+		if (hypeTimelineDuration === 0 || hypeTimelineDuration === undefined) {
+			console.warn("⚠️ Timeline '" + timelineName + "' not found or has zero duration");
+			return null;
+		}
+
+		// Create virtual GSAP timeline for proxy control
+		const proxyTimeline = gsap.timeline({ 
+			paused: true
+		});
+
+		// Dummy tween that updates Hype timeline on progress
+		proxyTimeline.to({}, {
+			duration: 1,
+			ease: "none",
+			onUpdate: function() {
+				const progress = proxyTimeline.progress();
+				api.goToTimeInTimelineNamed(progress * hypeTimelineDuration, timelineName);
+			}
+		});
+
+		// Store proxy timeline reference
+		proxyTimelines.set(triggerId, {
+			proxy: proxyTimeline,
+			timelineName: timelineName,
+			api: api,
+			duration: hypeTimelineDuration,
+			smoothEnabled: options.smooth !== false
+		});
+
+		return proxyTimelines.get(triggerId);
 	}
 
 	/**
-	 * Animate timeline with RAF
+	 * Update timeline progress via GSAP proxy
 	 */
-	function animateTimeline(trigger) {
-		const state = timelineStates.get(trigger);
-		if (!state) return;
-		
-		const diff = Math.abs(state.targetProgress - state.currentProgress);
-		
-		if (diff > 0.001) {
-			// Interpolation (lerp)
-			state.currentProgress += (state.targetProgress - state.currentProgress) * state.smoothFactor;
-			
-			// Timeline Update
-			if (state.timelineName) {
-				const duration = state.api.durationForTimelineNamed(state.timelineName);
-				if (duration !== 0) {
-					state.api.goToTimeInTimelineNamed(state.currentProgress * duration, state.timelineName);
-				}
-			}
-			
-			// Continue animation
-			requestAnimationFrame(() => animateTimeline(trigger));
-		} else {
-			// End animation
-			state.animating = false;
-			state.currentProgress = state.targetProgress;
-			
-			// Set final value
-			if (state.timelineName) {
-				const duration = state.api.durationForTimelineNamed(state.timelineName);
-				if (duration !== 0) {
-					state.api.goToTimeInTimelineNamed(state.currentProgress * duration, state.timelineName);
-				}
-			}
+	function updateTimelineProgress(triggerId, targetProgress, options = {}) {
+		const proxyData = proxyTimelines.get(triggerId);
+		if (!proxyData) return;
+
+		 // Defensive clamp
+		 targetProgress = Math.max(0, Math.min(1, targetProgress));
+		 if (!isFinite(targetProgress)) return;
+
+		if (!proxyData.smoothEnabled) {
+			// Direct update without smoothing
+			proxyData.proxy.progress(targetProgress);
+			return;
 		}
+
+		// Kill any existing tweens on this proxy timeline
+		//gsap.killTweensOf(proxyData.proxy);
+
+		// Use GSAP's built-in smoothing
+		gsap.to(proxyData.proxy, {
+			progress: targetProgress,
+			duration: options.smoothDuration || _default.options.smoothDuration,
+			ease: options.smoothEase || _default.options.smoothEase,
+			overwrite: 'auto'
+		});
 	}
 
 	/**
-	 * Cleanup smooth timeline state
+	 * Cleanup proxy timeline
 	 */
-	function cleanupSmoothTimeline(trigger) {
-		timelineStates.delete(trigger);
+	function cleanupTimelineProxy(triggerId) {
+		const proxyData = proxyTimelines.get(triggerId);
+		if (proxyData) {
+			gsap.killTweensOf(proxyData.proxy);
+			proxyData.proxy.kill();
+			proxyTimelines.delete(triggerId);
+		}
 	}
 
 	/**
@@ -209,349 +177,367 @@ if ("HypeScrollTrigger" in window === false) window['HypeScrollTrigger'] = (func
  * Add scroll timeline using GSAP ScrollTrigger
  */
 function addScrollTimeline(hypeDocument, element, timelineName, options) {
-    try {
-        const sceneId = hypeDocument.currentSceneId();
-        const hasActionEvents = "HypeActionEvents" in window !== false;
-        const scrollName = options.scrollName || timelineName;
-        
-    // Merge options with defaults
-    options = Object.assign({}, _default.options, options);
-    
-    const sceneElement = document.getElementById(sceneId);
-    const isHorizontal = options.horizontal || false;
-    const dimension = isHorizontal ? 'width' : 'height';
-    
-    // Determine the correct scroller
-    const scroller = window; // Use window as default scroller
-    
-    const elementDimension = element.getBoundingClientRect()[dimension];
-    const sceneBounds = sceneElement.getBoundingClientRect();
-    const elementBounds = element.getBoundingClientRect();
-    const cumulativeOffset = isHorizontal ? 
-        elementBounds.left - sceneBounds.left : 
-        elementBounds.top - sceneBounds.top;
-    
-    let offset = options.offset !== undefined ? options.offset : cumulativeOffset;
-    let duration = options.duration !== undefined ? options.duration : elementDimension;
-    let triggerHook = options.triggerHook !== undefined ? options.triggerHook : 0.5;
-    
-    const symbolInstance = getSymbolInstance(hypeDocument, element);
-    const api = symbolInstance ? symbolInstance : hypeDocument;
-    
-    // --- WRAPPER LOGIC FOR PINNING ---
-	let elementToPin = element;
-	if (options.pin) {
-	    // Check if element is already in a pin wrapper
-	    const existingWrapper = element.closest('.hype-gsap-scroll-pin-wrapper');
-	    if (existingWrapper) {
-	        elementToPin = existingWrapper;
-	    } else {
-	        const wrapper = document.createElement('div');
-	        wrapper.classList.add('hype-gsap-scroll-pin-wrapper');
-	        element.parentNode.insertBefore(wrapper, element);
-	        wrapper.appendChild(element);
-	        elementToPin = wrapper;
-	    }
+	try {
+		const sceneId = hypeDocument.currentSceneId();
+		const hasActionEvents = "HypeActionEvents" in window !== false;
+		const scrollName = options.scrollName || timelineName;
+		
+		// Merge options with defaults
+		options = Object.assign({}, _default.options, options);
+		
+		const sceneElement = document.getElementById(sceneId);
+		const isHorizontal = options.horizontal || false;
+		const dimension = isHorizontal ? 'width' : 'height';
+		
+		// Determine the correct scroller
+		const scroller = window; // Use window as default scroller
+		
+		const elementDimension = element.getBoundingClientRect()[dimension];
+		const sceneBounds = sceneElement.getBoundingClientRect();
+		const elementBounds = element.getBoundingClientRect();
+		const cumulativeOffset = isHorizontal ? 
+			elementBounds.left - sceneBounds.left : 
+			elementBounds.top - sceneBounds.top;
+		
+		let offset = options.offset !== undefined ? options.offset : cumulativeOffset;
+		let duration = options.duration !== undefined ? options.duration : elementDimension;
+		let triggerHook = options.triggerHook !== undefined ? options.triggerHook : 0.5;
+		
+		const symbolInstance = getSymbolInstance(hypeDocument, element);
+		const api = symbolInstance ? symbolInstance : hypeDocument;
+		
+		// --- WRAPPER LOGIC FOR PINNING ---
+		let elementToPin = element;
+		if (options.pin) {
+			// Check if element is already in a pin wrapper
+			const existingWrapper = element.closest('.hype-gsap-scroll-pin-wrapper');
+			if (existingWrapper) {
+				elementToPin = existingWrapper;
+			} else {
+				// Get element dimensions BEFORE wrapping
+				const elementStyles = window.getComputedStyle(element);
+				
+				const wrapper = document.createElement('div');
+				wrapper.classList.add('hype-gsap-scroll-pin-wrapper');
+				
+				// ONLY copy width and height - let Hype handle positioning
+				wrapper.style.width = elementStyles.width;
+				wrapper.style.height = elementStyles.height;
+				
+				element.parentNode.insertBefore(wrapper, element);
+				wrapper.appendChild(element);
+				elementToPin = wrapper;
+			}
+		}
+		// --- END WRAPPER LOGIC ---
+		
+		// Parse duration
+		if (typeof duration === 'string') {
+			if (duration.endsWith('vh')) {
+				// Convert viewport height to pixels
+				duration = parseFloat(duration) / 100 * window.innerHeight;
+			} else if (duration.endsWith('vw')) {
+				// Convert viewport width to pixels  
+				duration = parseFloat(duration) / 100 * window.innerWidth;
+			} else if (duration.endsWith('%')) {
+				// Convert percentage of element dimension to pixels
+				duration = parseFloat(duration) / 100 * elementDimension;
+			} else {
+				// Parse as pixel value
+				duration = parseFloat(duration);
+			}
+		}
+		
+		// Parse offset
+		if (typeof offset === 'string') {
+			if (offset.endsWith('%')) {
+				offset = parseFloat(offset) / 100 * elementDimension + cumulativeOffset;
+			} else {
+				offset = parseFloat(offset);
+			}
+		}
+		
+		// Handle Hype Action Events for dynamic values
+		if (hasActionEvents) {
+			const scrollCode = options.scrollCode;
+			const offsetCode = options.offsetCode || scrollCode;
+			const durationCode = options.durationCode || scrollCode;
+			const triggerHookCode = options.triggerHookCode || scrollCode;
+			const scope = {
+				offset: offset,
+				duration: duration,
+				triggerHook: triggerHook,
+			}
+			
+			if (offsetCode) {
+				offset = hypeDocument.triggerAction('return ' + offsetCode, {
+					element: element,
+					scope: scope,
+					event: Object.assign(scope, { type: 'offset' }),
+				}) ?? offset;
+			}
+			if (durationCode) {
+				duration = hypeDocument.triggerAction('return ' + durationCode, {
+					element: element,
+					scope: scope,
+					event: Object.assign(scope, { type: 'duration' }),
+				}) ?? duration;
+			}
+			if (triggerHookCode) {
+				triggerHook = hypeDocument.triggerAction('return ' + triggerHookCode, {
+					element: element,
+					scope: scope,
+					event: Object.assign(scope, { type: 'triggerHook' }),
+				}) ?? triggerHook;
+			}
+		}
+		
+		// Store trigger reference for scene management
+		const triggerId = element.id;
+		
+		// Initialize timeline proxy system
+		let proxyData = null;
+		if (timelineName && api && api.durationForTimelineNamed) {
+			// Reset timeline to time 0 first if reset option is true
+			if (options.reset) {
+				api.pauseTimelineNamed(timelineName);
+				api.goToTimeInTimelineNamed(0, timelineName);
+			}
+			
+			// Create GSAP timeline proxy for smooth control
+			proxyData = createTimelineProxy(triggerId, timelineName, api, {
+				smooth: options.smooth,
+				smoothDuration: options.smoothDuration,
+				smoothEase: options.smoothEase
+			});
+		}
+		
+		// --- EVENT HELPER FUNCTIONS ---
+		function triggerBehavior(eventType, event) {
+			const eventScrollDirection = event.scrollDirection.charAt(0).toUpperCase() + event.scrollDirection.slice(1).toLowerCase();
+			const eventName = scrollName ? scrollName + ' ' : '';
+			const behaviorSpecific = eventName + eventType + ' ' + eventScrollDirection;
+			const behaviorGeneral = eventName + eventType;
+		
+			hypeDocument.triggerCustomBehaviorNamed(behaviorSpecific);
+			hypeDocument.triggerCustomBehaviorNamed(behaviorGeneral);
+	
+			if (_default.logBehavior) {
+				console.log(behaviorGeneral);
+				console.log(behaviorSpecific);
+			}
+		}
+	
+		function triggerAction(eventType, event) {
+			if (hasActionEvents) {
+				const scrollCode = options.scrollCode;
+				const code = options[eventType.toLowerCase() + 'Code'] || scrollCode;
+				if (code) hypeDocument.triggerAction(code, {
+					element: element,
+					event: event,
+				});
+			}
+		}
+	
+		// Create ScrollMagic-compatible event objects
+		function createEvent(type, scrollDirection, progress = null) {
+			const event = {
+				type: type,
+				scrollDirection: scrollDirection,
+				target: element,
+				currentTarget: element
+			};
+			
+			// Add progress for progress events
+			if (progress !== null) {
+				event.progress = progress;
+			}
+			
+			return event;
+		}
+		// --- END EVENT HELPER FUNCTIONS ---
+		
+		// Create ScrollTrigger configuration
+		const scrollTriggerConfig = {
+			trigger: sceneElement,
+			scroller: scroller,
+			start: `top+=${offset} ${triggerHookToStart(triggerHook, isHorizontal)}`,
+			end: duration === 0 ? `top+=${offset} ${triggerHookToStart(triggerHook, isHorizontal)}` : `top+=${offset + duration} ${triggerHookToStart(triggerHook, isHorizontal)}`,
+			
+			horizontal: isHorizontal,
+			pin: options.pin ? elementToPin : false,
+			pinSpacing: false,
+			fastScrollEnd: true,
+			anticipatePin: 1,
+			syncInterval: 16,
+			refreshPriority: -1,
+			preventOverlaps: true,
+			scrub: true,
+			invalidateOnRefresh: true,
+			
+			markers: (_default.addIndicators || options.addIndicators) ? {
+				startColor: options.indicatorColor || 'grey',
+				endColor: options.indicatorColor || 'grey',
+				fontSize: "12px",
+				fontWeight: "bold",
+				indent: 10
+			} : false
+		};
+		
+		// Set up CSS variables if needed
+		if (options.hasOwnProperty('properties')) {
+			const varName = typeof options.properties === 'string' ? options.properties || 'scroll' : 'scroll';
+			const rootElm = varName === 'scroll' ? element : document.getElementById(hypeDocument.documentId());
+			rootElm.style.setProperty('--' + varName + '-duration', duration);
+			rootElm.style.setProperty('--' + varName + '-offset', offset);
+			rootElm.style.setProperty('--' + varName + '-trigger-hook', triggerHook);
+			rootElm.style.setProperty('--' + varName + '-progress', 0);
+			rootElm.style.setProperty('--' + varName + '-pin', options.pin ? '1' : '0');
+			rootElm.style.setProperty('--' + varName + '-start', scrollTriggerConfig.start);
+			rootElm.style.setProperty('--' + varName + '-end', scrollTriggerConfig.end);
+		}
+		
+		// Setup callbacks
+		scrollTriggerConfig.onUpdate = (self) => {
+			const progress = self.progress;
+			if (self.oldProgress == progress) return;
+
+			// Update CSS variables
+			if (options.hasOwnProperty('properties')) {
+				const varName = typeof options.properties === 'string' ? options.properties || 'scroll' : 'scroll';
+				const rootElm = varName === 'scroll' ? element : document.getElementById(hypeDocument.documentId());
+				rootElm.style.setProperty('--' + varName + '-progress', progress);
+			}
+			
+			// Update timeline via GSAP proxy system
+			if (timelineName && proxyData) {
+				updateTimelineProgress(triggerId, progress, {
+					smoothDuration: options.smoothDuration,
+					smoothEase: options.smoothEase
+				});
+			}
+			
+			// Trigger action events with ScrollMagic-compatible event object
+			if (hasActionEvents) {
+				const scrollCode = options.scrollCode;
+				const code = options.progressCode || scrollCode;
+				if (code) {
+					const event = createEvent('progress', self.direction > 0 ? 'FORWARD' : 'REVERSE', progress);
+					hypeDocument.triggerAction(code, {
+						element: element,
+						event: event,
+					});
+				}
+			}
+			self.oldProgress = progress;
+		};
+		
+		// Add onRefresh callback to sync timeline on layout changes
+		scrollTriggerConfig.onRefresh = (self) => {
+			// Update CSS variables
+			if (options.hasOwnProperty('properties')) {
+				const varName = typeof options.properties === 'string' ? options.properties || 'scroll' : 'scroll';
+				const rootElm = varName === 'scroll' ? element : document.getElementById(hypeDocument.documentId());
+				rootElm.style.setProperty('--' + varName + '-progress', self.progress);
+			}
+			
+			// Sync timeline to current progress via proxy system (buggy and not needed, will remove soon)
+			// if (timelineName && proxyData) {
+			//	updateTimelineProgress(triggerId, self.progress, { smoothDuration: 0 });
+			//}
+		};
+		
+		// Enter/Leave events with ScrollMagic-compatible event objects
+		const shouldTriggerEnter = (scrollName && _default.behavior.enter);
+		if (shouldTriggerEnter || options.enterCode) {
+			scrollTriggerConfig.onEnter = (self) => {
+				const event = createEvent('enter', 'FORWARD');
+				
+				// Add classes
+				if (options.elementClass) {
+					element.classList.add(options.elementClass);
+				}
+				if (options.sceneClass) {
+					sceneElement.classList.add(options.sceneClass);
+				}
+				
+				// Trigger behaviors and actions
+				if (shouldTriggerEnter) triggerBehavior('Enter', event);
+				if (options.enterCode) triggerAction('Enter', event);
+			};
+	
+			scrollTriggerConfig.onEnterBack = (self) => {
+				const event = createEvent('enter', 'REVERSE');
+				
+				// Add classes
+				if (options.elementClass) {
+					element.classList.add(options.elementClass);
+				}
+				if (options.sceneClass) {
+					sceneElement.classList.add(options.sceneClass);
+				}
+				
+				// Trigger behaviors and actions
+				if (shouldTriggerEnter) triggerBehavior('Enter', event);
+				if (options.enterCode) triggerAction('Enter', event);
+			};
+		}
+	
+		const shouldTriggerLeave = (scrollName && _default.behavior.leave);
+		if (shouldTriggerLeave || options.leaveCode) {
+			scrollTriggerConfig.onLeave = (self) => {		
+				const event = createEvent('leave', 'FORWARD');
+				self.refresh();
+				// Remove classes
+				if (options.elementClass) {
+					element.classList.remove(options.elementClass);
+				}
+				if (options.sceneClass) {
+					sceneElement.classList.remove(options.sceneClass);
+				}
+				
+				// Trigger behaviors and actions
+				if (shouldTriggerLeave) triggerBehavior('Leave', event);
+				if (options.leaveCode) triggerAction('Leave', event);
+			};
+	
+			scrollTriggerConfig.onLeaveBack = (self) => {		
+				const event = createEvent('leave', 'REVERSE');
+
+				// Remove classes
+				if (options.elementClass) {
+					element.classList.remove(options.elementClass);
+				}
+				if (options.sceneClass) {
+					sceneElement.classList.remove(options.sceneClass);
+				}
+				
+				// Trigger behaviors and actions
+				if (shouldTriggerLeave) triggerBehavior('Leave', event);
+				if (options.leaveCode) triggerAction('Leave', event);
+			};
+		}
+		
+		// Create ScrollTrigger
+		const trigger = ScrollTrigger.create(scrollTriggerConfig);
+		
+		// Store trigger for cleanup
+		if (!triggers[sceneId]) triggers[sceneId] = [];
+		triggers[sceneId].push({ trigger, id: triggerId });
+		
+		// Initialize timeline proxy with current progress
+		if (timelineName && proxyData) {
+			const currentProgress = trigger.progress;
+			updateTimelineProgress(triggerId, currentProgress, { smoothDuration: 0 });
+		}
+		
+		return trigger;
+	
+	} catch (error) {
+		console.error("❌ Error in addScrollTimeline:", error);
+		console.error("Stack trace:", error.stack);
+		return null;
 	}
-    // --- END WRAPPER LOGIC ---
-    
-    // Parse duration
-    if (typeof duration === 'string') {
-        const viewportUnit = isHorizontal ? 'vw' : 'vh';
-        if (duration.endsWith(viewportUnit)) {
-            duration = parseInt(duration) + '%';
-        } else if (duration.endsWith('%')) {
-            duration = parseFloat(duration) / 100 * elementDimension;
-        } else {
-            duration = parseFloat(duration);
-        }
-    }
-    
-    // Parse offset
-    if (typeof offset === 'string') {
-        if (offset.endsWith('%')) {
-            offset = parseFloat(offset) / 100 * elementDimension + cumulativeOffset;
-        } else {
-            offset = parseFloat(offset);
-        }
-    }
-    
-    // Handle Hype Action Events for dynamic values
-    if (hasActionEvents) {
-        const scrollCode = options.scrollCode;
-        const offsetCode = options.offsetCode || scrollCode;
-        const durationCode = options.durationCode || scrollCode;
-        const triggerHookCode = options.triggerHookCode || scrollCode;
-        const scope = {
-            offset: offset,
-            duration: duration,
-            triggerHook: triggerHook,
-        }
-        
-        if (offsetCode) {
-            offset = hypeDocument.triggerAction('return ' + offsetCode, {
-                element: element,
-                scope: scope,
-                event: Object.assign(scope, { type: 'offset' }),
-            }) ?? offset;
-        }
-        if (durationCode) {
-            duration = hypeDocument.triggerAction('return ' + durationCode, {
-                element: element,
-                scope: scope,
-                event: Object.assign(scope, { type: 'duration' }),
-            }) ?? duration;
-        }
-        if (triggerHookCode) {
-            triggerHook = hypeDocument.triggerAction('return ' + triggerHookCode, {
-                element: element,
-                scope: scope,
-                event: Object.assign(scope, { type: 'triggerHook' }),
-            }) ?? triggerHook;
-        }
-    }
-    
-    // Store trigger reference for scene management
-    const triggerId = `${sceneId}_${element.id}_${Date.now()}`;
-    
-    // CRITICAL: Initialize timeline like ScrollMagic's "add" event (reset to 0 if reset option is true)
-    if (timelineName && api && api.durationForTimelineNamed) {
-        const timelineDuration = api.durationForTimelineNamed(timelineName);
-        
-        if (timelineDuration !== undefined && timelineDuration !== null) {
-            // Reset timeline to time 0 first (equivalent to ScrollMagic's scene.on("add") reset)
-            if (options.reset) {
-                api.pauseTimelineNamed(timelineName);
-                api.goToTimeInTimelineNamed(0, timelineName);
-            }
-            
-            // Initialize smooth timeline state
-            initSmoothTimeline(triggerId, timelineName, api, {
-                smooth: options.smooth,
-                smoothFactor: options.smoothFactor
-            });
-        } else {
-            console.warn("⚠️ Timeline '" + timelineName + "' not found in Hype document");
-        }
-    }
-    
-    // --- EVENT HELPER FUNCTIONS ---
-    function triggerBehavior(eventType, event) {
-        const eventScrollDirection = event.scrollDirection.charAt(0).toUpperCase() + event.scrollDirection.slice(1).toLowerCase();
-        const eventName = scrollName ? scrollName + ' ' : '';
-        const behaviorSpecific = eventName + eventType + ' ' + eventScrollDirection;
-        const behaviorGeneral = eventName + eventType;
-    
-        hypeDocument.triggerCustomBehaviorNamed(behaviorSpecific);
-        hypeDocument.triggerCustomBehaviorNamed(behaviorGeneral);
-
-        if (_default.logBehavior) {
-            console.log(behaviorGeneral);
-            console.log(behaviorSpecific);
-        }
-    }
-
-    function triggerAction(eventType, event) {
-        if (hasActionEvents) {
-            const scrollCode = options.scrollCode;
-            const code = options[eventType.toLowerCase() + 'Code'] || scrollCode;
-            if (code) hypeDocument.triggerAction(code, {
-                element: element,
-                event: event,
-            });
-        }
-    }
-
-    // Create ScrollMagic-compatible event objects
-    function createEvent(type, scrollDirection, progress = null) {
-        const event = {
-            type: type,
-            scrollDirection: scrollDirection,
-            target: element,
-            currentTarget: element
-        };
-        
-        // Add progress for progress events
-        if (progress !== null) {
-            event.progress = progress;
-        }
-        
-        return event;
-    }
-    // --- END EVENT HELPER FUNCTIONS ---
-    
-    // Create ScrollTrigger configuration
-    const scrollTriggerConfig = {
-        trigger: sceneElement,
-        scroller: scroller,
-        start: `top+=${offset} ${triggerHookToStart(triggerHook, isHorizontal)}`,
-        end: duration === 0 ? `top+=${offset} ${triggerHookToStart(triggerHook, isHorizontal)}` : `+=${duration}`,
-        horizontal: isHorizontal,
-        pin: options.pin ? elementToPin : false,
-        pinSpacing: false,
-        markers: (_default.addIndicators || options.addIndicators) ? {
-            startColor: options.indicatorColor || 'grey',
-            endColor: options.indicatorColor || 'grey',
-            fontSize: "12px",
-            fontWeight: "bold",
-            indent: 10
-        } : false,
-        scrub: false,
-        toggleActions: "play none none reverse",
-        invalidateOnRefresh: true,
-    };
-    
-    // Set up CSS variables if needed
-    if (options.hasOwnProperty('properties')) {
-        const varName = typeof options.properties === 'string' ? options.properties || 'scroll' : 'scroll';
-        const rootElm = varName === 'scroll' ? element : document.getElementById(hypeDocument.documentId());
-        rootElm.style.setProperty('--' + varName + '-duration', duration);
-        rootElm.style.setProperty('--' + varName + '-offset', offset);
-        rootElm.style.setProperty('--' + varName + '-trigger-hook', triggerHook);
-        rootElm.style.setProperty('--' + varName + '-progress', 0);
-    }
-    
-    // Setup callbacks
-    scrollTriggerConfig.onUpdate = (self) => {
-        const progress = self.progress;
-        
-        // Update CSS variables
-        if (options.hasOwnProperty('properties')) {
-            const varName = typeof options.properties === 'string' ? options.properties || 'scroll' : 'scroll';
-            const rootElm = varName === 'scroll' ? element : document.getElementById(hypeDocument.documentId());
-            rootElm.style.setProperty('--' + varName + '-progress', progress);
-        }
-        
-        // Update timeline with smooth animation (equivalent to ScrollMagic's progress event)
-        if (timelineName) {
-            updateTimelineSmooth(triggerId, progress);
-        }
-        
-        // Trigger action events with ScrollMagic-compatible event object
-        if (hasActionEvents) {
-            const scrollCode = options.scrollCode;
-            const code = options.progressCode || scrollCode;
-            if (code) {
-                const event = createEvent('progress', self.direction > 0 ? 'FORWARD' : 'REVERSE', progress);
-                hypeDocument.triggerAction(code, {
-                    element: element,
-                    event: event,
-                });
-            }
-        }
-    };
-    
-    // Add onRefresh callback to sync timeline on layout changes
-    scrollTriggerConfig.onRefresh = (self) => {
-        // Update CSS variables
-        if (options.hasOwnProperty('properties')) {
-            const varName = typeof options.properties === 'string' ? options.properties || 'scroll' : 'scroll';
-            const rootElm = varName === 'scroll' ? element : document.getElementById(hypeDocument.documentId());
-            rootElm.style.setProperty('--' + varName + '-progress', self.progress);
-        }
-        
-        // Sync timeline to current progress via smooth animation
-        if (timelineName) {
-            updateTimelineSmooth(triggerId, self.progress);
-        }
-    };
-    
-    // Enter/Leave events with ScrollMagic-compatible event objects
-    const shouldTriggerEnter = (scrollName && _default.behavior.enter);
-    if (shouldTriggerEnter || options.enterCode) {
-        scrollTriggerConfig.onEnter = () => {
-            const event = createEvent('enter', 'FORWARD');
-            
-            // Add classes
-            if (options.elementClass) {
-                element.classList.add(options.elementClass);
-            }
-            if (options.sceneClass) {
-                sceneElement.classList.add(options.sceneClass);
-            }
-            
-            // Trigger behaviors and actions
-            if (shouldTriggerEnter) triggerBehavior('Enter', event);
-            if (options.enterCode) triggerAction('Enter', event);
-        };
-
-        scrollTriggerConfig.onEnterBack = () => {
-            const event = createEvent('enter', 'REVERSE');
-            
-            // Add classes
-            if (options.elementClass) {
-                element.classList.add(options.elementClass);
-            }
-            if (options.sceneClass) {
-                sceneElement.classList.add(options.sceneClass);
-            }
-            
-            // Trigger behaviors and actions
-            if (shouldTriggerEnter) triggerBehavior('Enter', event);
-            if (options.enterCode) triggerAction('Enter', event);
-        };
-    }
-
-    const shouldTriggerLeave = (scrollName && _default.behavior.leave);
-    if (shouldTriggerLeave || options.leaveCode) {
-        scrollTriggerConfig.onLeave = () => {
-            const event = createEvent('leave', 'FORWARD');
-            
-            // Remove classes
-            if (options.elementClass) {
-                element.classList.remove(options.elementClass);
-            }
-            if (options.sceneClass) {
-                sceneElement.classList.remove(options.sceneClass);
-            }
-            
-            // Trigger behaviors and actions
-            if (shouldTriggerLeave) triggerBehavior('Leave', event);
-            if (options.leaveCode) triggerAction('Leave', event);
-        };
-
-        scrollTriggerConfig.onLeaveBack = () => {
-            const event = createEvent('leave', 'REVERSE');
-            
-            // Remove classes
-            if (options.elementClass) {
-                element.classList.remove(options.elementClass);
-            }
-            if (options.sceneClass) {
-                sceneElement.classList.remove(options.sceneClass);
-            }
-            
-            // Trigger behaviors and actions
-            if (shouldTriggerLeave) triggerBehavior('Leave', event);
-            if (options.leaveCode) triggerAction('Leave', event);
-        };
-    }
-    
-    // Create ScrollTrigger
-    const trigger = ScrollTrigger.create(scrollTriggerConfig);
-    
-    // Store trigger for cleanup
-    if (!triggers[sceneId]) triggers[sceneId] = [];
-    triggers[sceneId].push({ trigger, id: triggerId });
-    
-    // CRITICAL: Replicate ScrollMagic's automatic progress event firing
-    if (timelineName && api && api.durationForTimelineNamed) {
-        const currentProgress = trigger.progress;
-        const timelineDuration = api.durationForTimelineNamed(timelineName);
-        
-        if (timelineDuration !== 0 && timelineDuration !== undefined) {
-            // This replaces ScrollMagic's automatic progress event firing after scene.addTo(controller)
-            updateTimelineSmooth(triggerId, currentProgress);
-        }
-    }
-    
-    return trigger;
-    
-    } catch (error) {
-        console.error("❌ Error in addScrollTimeline:", error);
-        console.error("Stack trace:", error.stack);
-        return null;
-    }
 }
 
 	/**
@@ -564,10 +550,14 @@ function addScrollTimeline(hypeDocument, element, timelineName, options) {
 		};
 		
 		// Configure ScrollTrigger defaults
+		
 		ScrollTrigger.config({
 			limitCallbacks: true,
-			syncInterval: 40
+			syncInterval: 16,
+			//autoRefreshEvents: "visibilitychange,DOMContentLoaded,load,resize"
+			
 		});
+		
 	}
 	
 	/**
@@ -578,7 +568,7 @@ function addScrollTimeline(hypeDocument, element, timelineName, options) {
 		const actionEvents = hasActionEvents ? 
 			',[data-scroll-action],[data-scroll-progress-action],[data-scroll-enter-action],[data-scroll-leave-action]' : '';
 		
-		const selector = '[data-scroll-magic],[data-scroll-timeline],[data-scroll-pin],[data-scroll-properties],[data-scroll-element-class],[data-scroll-scene-class]' + actionEvents;
+		const selector = '[data-scroll-trigger],[data-scroll-timeline],[data-scroll-pin],[data-scroll-properties],[data-scroll-element-class],[data-scroll-scene-class]' + actionEvents;
 		
 		const scrollElements = sceneElement.querySelectorAll(selector);
 		
@@ -600,8 +590,9 @@ function addScrollTimeline(hypeDocument, element, timelineName, options) {
 				// Smooth Scrolling Options
 				smooth: element.hasAttribute('data-scroll-smooth') ? 
 					element.getAttribute('data-scroll-smooth') !== 'false' : undefined,
-				smoothFactor: element.getAttribute('data-scroll-smooth-factor') ? 
-					parseFloat(element.getAttribute('data-scroll-smooth-factor')) : undefined,
+				smoothDuration: element.getAttribute('data-scroll-smooth-duration') ? 
+					parseFloat(element.getAttribute('data-scroll-smooth-duration')) : undefined,
+				smoothEase: element.getAttribute('data-scroll-smooth-ease') || undefined,
 			};
 			
 			if (element.hasAttribute('data-scroll-name')) {
@@ -664,10 +655,10 @@ function addScrollTimeline(hypeDocument, element, timelineName, options) {
 	function HypeSceneUnload(hypeDocument, element) {
 		const sceneId = element.id;
 		
-		// Cleanup smooth timeline states
+		// Cleanup proxy timelines
 		if (triggers[sceneId]) {
 			triggers[sceneId].forEach(({ id }) => {
-				cleanupSmoothTimeline(id);
+				cleanupTimelineProxy(id);
 			});
 		}
 		
@@ -709,7 +700,7 @@ function addScrollTimeline(hypeDocument, element, timelineName, options) {
 				scrollTriggerVersion: ScrollTrigger.version,
 				triggers: triggers,
 				scrollTriggers: ScrollTrigger.getAll(),
-				timelineStates: timelineStates
+				proxyTimelines: proxyTimelines
 			};
 		}
 	};
